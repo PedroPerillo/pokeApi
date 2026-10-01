@@ -1,14 +1,35 @@
-"""PokéChat Streamlit frontend. All data and LLM calls go through the FastAPI backend."""
+"""PokéChat Streamlit frontend.
+
+Talks to the FastAPI backend when BACKEND_URL is set; otherwise runs the backend service
+in-process (how it is deployed on Streamlit Community Cloud).
+"""
 
 import os
+import sys
+from pathlib import Path
 
-import httpx
 import streamlit as st
 from dotenv import load_dotenv
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # make `backend` importable
 load_dotenv()
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
+
+def _load_secrets_into_env() -> None:
+    """Expose Streamlit secrets (Community Cloud) as env vars before backend config is read."""
+    try:
+        secrets = dict(st.secrets)
+    except Exception:  # no secrets.toml locally
+        return
+    for key, value in secrets.items():
+        if isinstance(value, str):
+            os.environ.setdefault(key, value)
+
+
+_load_secrets_into_env()
+
+from frontend.gateway import BackendError, HttpBackend, LocalBackend  # noqa: E402
+
 TEAM_SIZE = 6
 TYPE_COLORS = {
     "normal": "#A8A77A", "fire": "#EE8130", "water": "#6390F0", "electric": "#F7D02C",
@@ -35,18 +56,13 @@ ss.setdefault("pending_prompt", None)
 # ------------------------------------------------------------------- API
 
 
-class BackendError(Exception):
-    pass
+@st.cache_resource(show_spinner="Loading the Pokédex…")
+def get_backend() -> HttpBackend | LocalBackend:
+    url = os.getenv("BACKEND_URL")
+    return HttpBackend(url) if url else LocalBackend()
 
 
-def api(method: str, path: str, **kwargs):
-    try:
-        resp = httpx.request(method, f"{BACKEND_URL}{path}", timeout=90, **kwargs)
-    except httpx.HTTPError as exc:
-        raise BackendError(f"Can't reach the backend at {BACKEND_URL} ({exc}). Is FastAPI running?") from exc
-    if resp.status_code >= 400:
-        raise BackendError(resp.json().get("detail", resp.text))
-    return resp.json()
+backend = get_backend()
 
 
 # ------------------------------------------------------------- rendering
@@ -84,7 +100,7 @@ def render_card(card: dict, key: str, show_add: bool = True) -> None:
 def render_cards(cards: list[dict], key_prefix: str) -> None:
     if not cards:
         return
-    cols = st.columns(min(len(cards), 4))
+    cols = st.columns(4)
     for i, card in enumerate(cards):
         with cols[i % len(cols)]:
             render_card(card, key=f"{key_prefix}-{card['name']}")
@@ -119,12 +135,12 @@ def lookup(name: str) -> None:
     if not name:
         return
     try:
-        check = api("GET", f"/pokemon/{name}/exists")
+        check = backend.exists(name)
         if not check["exists"]:
             ss.selected = None
             st.sidebar.error(f"“{name}” doesn't exist in PokeAPI.")
             return
-        ss.selected = api("GET", f"/pokemon/{check['name']}")
+        ss.selected = backend.profile(check["name"])
     except BackendError as exc:
         st.sidebar.error(str(exc))
 
@@ -153,7 +169,7 @@ with st.sidebar:
                       on_click=lambda n=member["name"]: ss.update(team=[p for p in ss.team if p["name"] != n]))
     if ss.team:
         try:
-            analysis = api("POST", "/team/analysis", json={"team": [p["name"] for p in ss.team]})
+            analysis = backend.team_report([p["name"] for p in ss.team])
             if analysis["shared_weaknesses_2plus"]:
                 st.warning("Shared weaknesses: " + ", ".join(analysis["shared_weaknesses_2plus"]))
             if analysis["unresisted_weaknesses"]:
@@ -198,13 +214,9 @@ if prompt:
     with st.chat_message("assistant"):
         with st.spinner("Checking PokeAPI and thinking…"):
             try:
-                data = api(
-                    "POST",
-                    "/chat",
-                    json={
-                        "messages": [{"role": m["role"], "content": m["content"]} for m in ss.messages],
-                        "team": [p["name"] for p in ss.team],
-                    },
+                data = backend.chat(
+                    [{"role": m["role"], "content": m["content"]} for m in ss.messages],
+                    [p["name"] for p in ss.team],
                 )
             except BackendError as exc:
                 ss.messages.pop()  # let the user retry the same question

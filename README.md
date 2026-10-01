@@ -5,6 +5,8 @@ Chat with an LLM about Pokémon and get help building a team. Every fact it uses
 
 - **Frontend:** Streamlit (`frontend/app.py`). It has a chat, a Pokédex lookup with sprites and stats, and a team builder.
 - **Backend:** FastAPI (`backend/`). It checks that each Pokémon exists, gathers its data from PokeAPI, and calls Groq.
+  The logic lives in `backend/service.py`. The Streamlit app calls the FastAPI server when `BACKEND_URL`
+  is set. Otherwise it runs the same service in-process, which is how it runs on Streamlit Community Cloud.
 - **LLM:** `openai/gpt-oss-20b` on [Groq](https://console.groq.com).
 
 ## How it works
@@ -26,7 +28,7 @@ Chat with an LLM about Pokémon and get help building a team. Every fact it uses
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dev.txt
 cp .env.example .env   # then set GROQ_API_KEY
 ```
 
@@ -44,6 +46,16 @@ Or run each piece in its own terminal:
 ```
 
 Open http://localhost:8501. API docs are at http://localhost:8000/docs.
+
+## Deploy to Streamlit Community Cloud
+
+1. Go to https://share.streamlit.io, sign in with GitHub, and click **Create app → Deploy a public app from GitHub**.
+2. Repository: `PedroPerillo/pokeApi`. Branch: `main`. Main file path: `frontend/app.py`.
+3. Open **Advanced settings**, pick Python 3.12, and paste this into **Secrets**:
+   ```toml
+   GROQ_API_KEY = "your-groq-api-key"
+   ```
+4. Click **Deploy**. Leave `BACKEND_URL` unset so the app runs the backend in-process.
 
 ## API
 

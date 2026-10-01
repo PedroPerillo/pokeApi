@@ -1,28 +1,21 @@
-import asyncio
 from contextlib import asynccontextmanager
-from typing import Any, Literal
+from typing import Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from backend import config
-from backend.llm import TEAM_SIZE, GroqChat, LLMError, team_analysis
-from backend.pokeapi_client import PokeAPIClient, PokeAPIError, normalize_name
-
-MAX_CARDS = 8
+from backend import config, service
+from backend.llm import TEAM_SIZE, GroqChat, LLMError
+from backend.pokeapi_client import PokeAPIClient, PokeAPIError
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with httpx.AsyncClient(timeout=20, follow_redirects=True) as http:
-        app.state.pokeapi = PokeAPIClient(http, config.POKEAPI_BASE_URL)
-        try:
-            await app.state.pokeapi.load_index()
-        except PokeAPIError:
-            pass  # resolve() falls back to direct lookups until the index is available
-        app.state.llm = GroqChat(config.GROQ_API_KEY, config.GROQ_MODEL)
+        app.state.pokeapi = await service.create_pokeapi(http)
+        app.state.llm = service.create_llm()
         yield
 
 
@@ -68,24 +61,6 @@ class ChatResponse(BaseModel):
     not_found: list[str]
 
 
-def to_card(profile: dict[str, Any]) -> PokemonCard:
-    return PokemonCard(**{k: profile[k] for k in PokemonCard.model_fields})
-
-
-async def gather_many(client: PokeAPIClient, names: list[str]) -> tuple[list[dict], list[str]]:
-    """Gather profiles for unique names; return (profiles, names that don't exist)."""
-    unique = list(dict.fromkeys(n for n in names if normalize_name(n)))
-    results = await asyncio.gather(*(client.gather(n) for n in unique))
-    profiles, missing, seen = [], [], set()
-    for name, profile in zip(unique, results):
-        if profile is None:
-            missing.append(name)
-        elif profile["name"] not in seen:
-            seen.add(profile["name"])
-            profiles.append(profile)
-    return profiles, missing
-
-
 # ---------------------------------------------------------------- routes
 
 
@@ -101,8 +76,7 @@ async def health(client: PokeAPIClient = Depends(get_pokeapi)):
 
 @app.get("/pokemon/{name}/exists")
 async def pokemon_exists(name: str, client: PokeAPIClient = Depends(get_pokeapi)):
-    resolved = await client.resolve(name)
-    return {"query": name, "exists": resolved is not None, "name": resolved}
+    return await service.exists(client, name)
 
 
 @app.get("/pokemon/{name}")
@@ -115,8 +89,7 @@ async def pokemon_profile(name: str, client: PokeAPIClient = Depends(get_pokeapi
 
 @app.post("/team/analysis")
 async def analyze_team(req: TeamRequest, client: PokeAPIClient = Depends(get_pokeapi)):
-    team, missing = await gather_many(client, req.team)
-    return {**team_analysis(team), "pokemon": [to_card(p) for p in team], "not_found": missing}
+    return await service.team_report(client, req.team)
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -125,25 +98,7 @@ async def chat(
     client: PokeAPIClient = Depends(get_pokeapi),
     llm: GroqChat = Depends(get_llm),
 ):
-    # 1. Verify the team and every Pokémon mentioned in the conversation (newest first).
-    team, not_found = await gather_many(client, req.team)
-    team_names = {p["name"] for p in team}
-    mentioned: list[str] = []
-    for m in reversed(req.messages):
-        if m.role == "user":
-            mentioned += client.find_mentions(m.content)
-    mentioned = [n for n in dict.fromkeys(mentioned) if n not in team_names][: config.MAX_POKEMON_PER_CHAT]
-    context, _ = await gather_many(client, mentioned)
-
-    # 2. Ask the model, letting it look up any other Pokémon it needs.
     try:
-        reply, _ = await llm.reply(
-            [m.model_dump() for m in req.messages], context, team, lookup=client.gather
-        )
+        return await service.chat(client, llm, [m.model_dump() for m in req.messages], req.team)
     except LLMError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-
-    # 3. Cards for the Pokémon the answer talks about (fall back to what the user asked about).
-    # Profiles are cached, so re-gathering Pokémon already seen this turn is free.
-    shown, _ = await gather_many(client, client.find_mentions(reply)[:MAX_CARDS])
-    return ChatResponse(reply=reply, pokemon=[to_card(p) for p in shown or context], not_found=not_found)

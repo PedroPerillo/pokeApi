@@ -109,8 +109,7 @@ def requests_log() -> list[str]:
     return []
 
 
-@pytest.fixture
-async def pokeapi(requests_log):
+def fake_pokeapi_transport(requests_log: list[str]) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         path = str(request.url).removeprefix(BASE + "/").rstrip("/")
         requests_log.append(path)
@@ -118,7 +117,12 @@ async def pokeapi(requests_log):
             return httpx.Response(200, json=ROUTES[path])
         return httpx.Response(404, text="Not Found")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+    return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+async def pokeapi(requests_log):
+    async with httpx.AsyncClient(transport=fake_pokeapi_transport(requests_log)) as http:
         client = PokeAPIClient(http, BASE)
         await client.load_index()
         yield client
