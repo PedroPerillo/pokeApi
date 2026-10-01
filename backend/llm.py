@@ -12,7 +12,7 @@ import logging
 from collections import Counter
 from typing import Any, Awaitable, Callable
 
-from groq import APIError, AsyncGroq, RateLimitError
+from groq import APIError, AsyncGroq, AuthenticationError, RateLimitError
 
 log = logging.getLogger("uvicorn.error")
 
@@ -205,6 +205,11 @@ class GroqChat:
                     temperature=0.4,
                     max_completion_tokens=MAX_COMPLETION_TOKENS,
                 )
+            except AuthenticationError as exc:
+                raise LLMError(
+                    "Groq rejected the API key. Check GROQ_API_KEY in .env (or the app's Secrets on Streamlit Cloud).",
+                    status_code=502,
+                ) from exc
             except RateLimitError as exc:
                 raise LLMError(
                     "Groq rate limit reached (the free tier allows ~8k tokens/minute). Wait a moment and retry.",

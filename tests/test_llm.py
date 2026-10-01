@@ -102,3 +102,16 @@ async def test_empty_answer_raises():
     fake = FakeGroq([completion("", finish_reason="length")])
     with pytest.raises(LLMError, match="empty answer"):
         await GroqChat("k", "m", client=fake).reply([{"role": "user", "content": "hi"}], [], [], lookup)
+
+
+async def test_invalid_api_key_gives_actionable_error():
+    import httpx
+    from groq import AuthenticationError
+
+    class RejectingGroq(FakeGroq):
+        async def create(self, **kwargs):
+            request = httpx.Request("POST", "https://api.groq.com")
+            raise AuthenticationError("401", response=httpx.Response(401, request=request), body=None)
+
+    with pytest.raises(LLMError, match="rejected the API key"):
+        await GroqChat("k", "m", client=RejectingGroq([])).reply([{"role": "user", "content": "hi"}], [], [], lookup)
